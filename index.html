@@ -11,16 +11,18 @@
   h1{margin:0;font-size:20px}
   main{flex:1;display:flex;gap:20px;padding:24px;align-items:flex-start;flex-wrap:wrap}
   .panel{background:#071528;padding:18px;border-radius:8px;box-shadow:0 6px 18px rgba(2,6,23,0.5);flex:1;min-width:320px}
-  #drop{border:2px dashed rgba(255,255,255,0.06);padding:28px;text-align:center;border-radius:8px;cursor:pointer;transition:border-color .2s}
+  #drop{border:2px dashed rgba(255,255,255,0.06);padding:28px;text-align:center;border-radius:8px;cursor:pointer;transition:border-color .15s}
   input[type=file]{display:none}
   button{background:#1b6cff;color:white;border:0;padding:10px 12px;border-radius:6px;cursor:pointer}
-  pre{background:#041021;color:#d3e7ff;padding:12px;border-radius:6px;overflow:auto;max-height:520px;white-space:pre-wrap}
+  pre, textarea{background:#041021;color:#d3e7ff;padding:12px;border-radius:6px;overflow:auto;max-height:520px;white-space:pre-wrap}
   .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
   label{font-size:13px;color:#9fb0d1}
   small{color:#9fb0d1}
   footer{padding:12px 24px;text-align:center;font-size:13px;color:#9fb0d1}
   .mini{font-size:12px;color:#9fb0d1}
   .row{display:flex;gap:8px;align-items:center;justify-content:center}
+  .status{margin-top:10px;color:#9fb0d1}
+  .ok{color:#7fffa1}
 </style>
 </head>
 <body>
@@ -30,7 +32,7 @@
   <section class="panel" style="max-width:540px;">
     <div id="drop">
       <p style="margin:0 0 8px 0"><strong>Drop a WAV file here</strong></p>
-      <p style="margin:0 0 12px 0"><small>PCM WAV (mono or stereo). We'll downmix automatically.</small></p>
+      <p style="margin:0 0 12px 0"><small>PCM WAV (mono or stereo). Stereo will be downmixed automatically.</small></p>
       <div class="row">
         <button id="pick">Select file</button>
         <input id="fileInput" type="file" accept=".wav,audio/wav" />
@@ -40,19 +42,19 @@
 
     <div style="margin-top:14px" class="controls">
       <label>Period (ms)
-        <input id="period" type="number" value="25" min="8" style="width:80px;margin-left:6px">
+        <input id="period" type="number" value="25" min="8" style="width:84px;margin-left:6px">
       </label>
       <label>Gain
-        <input id="gain" type="number" value="2.5" step="0.1" min="0.1" style="width:80px;margin-left:6px">
+        <input id="gain" type="number" value="2.5" step="0.1" min="0.1" style="width:84px;margin-left:6px">
       </label>
       <label>Smooth
-        <input id="smooth" type="number" value="3" min="1" style="width:80px;margin-left:6px">
+        <input id="smooth" type="number" value="3" min="1" style="width:84px;margin-left:6px">
       </label>
       <button id="go">Convert</button>
     </div>
 
-    <div id="status"><small>Drop a WAV to begin.</small></div>
-    <div class="mini" style="margin-top:8px">19 frequency buckets (forum method).</div>
+    <div id="status" class="status"><small>Drop a WAV to begin.</small></div>
+    <div class="mini" style="margin-top:8px">Uses dedicated threads per frequency bucket (forum technique).</div>
   </section>
 
   <section class="panel" style="flex:1 1 680px;">
@@ -65,7 +67,7 @@
     </div>
     <pre id="output">// result will appear here</pre>
     <div style="margin-top:12px" class="mini">
-      <strong>Tip:</strong> If the output sounds quiet in MakeCode, increase Gain or raise volumes in the buffers.
+      Tip: If output is quiet in MakeCode, increase Gain. Large files may be slow to process.
     </div>
   </section>
 </main>
@@ -75,119 +77,276 @@
 </footer>
 
 <script>
-/* ========== core logic ========== */
+/* ========= Utilities & FFT ========= */
 
+// Radix-2 Cooley-Tukey FFT for real input (pads to pow2)
 function fftReIm(signalReal) {
   let n0 = signalReal.length, n = 1;
   while (n < n0) n <<= 1;
   const re = new Float64Array(n), im = new Float64Array(n);
   re.set(signalReal);
-  for (let i=1,j=0;i<n;i++){let bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;if(i<j){[re[i],re[j]]=[re[j],re[i]];}}
-  for (let len=2;len<=n;len<<=1){
-    const ang=-2*Math.PI/len,wlenRe=Math.cos(ang),wlenIm=Math.sin(ang);
-    for(let i=0;i<n;i+=len){
-      let wRe=1,wIm=0;
-      for(let j=0;j<len/2;j++){
-        const uRe=re[i+j],uIm=im[i+j];
-        const vRe=re[i+j+len/2]*wRe - im[i+j+len/2]*wIm;
-        const vIm=re[i+j+len/2]*wIm + im[i+j+len/2]*wRe;
-        re[i+j]=uRe+vRe; im[i+j]=uIm+vIm;
-        re[i+j+len/2]=uRe-vRe; im[i+j+len/2]=uIm-vIm;
-        const nextWRe=wRe*wlenRe - wIm*wlenIm;
-        wIm=wRe*wlenIm + wIm*wlenRe;
-        wRe=nextWRe;
+  // bit reversal
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { const t = re[i]; re[i] = re[j]; re[j] = t; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wlenRe = Math.cos(ang), wlenIm = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let wRe = 1, wIm = 0;
+      for (let j = 0; j < len/2; j++) {
+        const uRe = re[i+j], uIm = im[i+j];
+        const vRe = re[i+j+len/2]*wRe - im[i+j+len/2]*wIm;
+        const vIm = re[i+j+len/2]*wIm + im[i+j+len/2]*wRe;
+        re[i+j] = uRe + vRe; im[i+j] = uIm + vIm;
+        re[i+j+len/2] = uRe - vRe; im[i+j+len/2] = uIm - vIm;
+        const nextWRe = wRe * wlenRe - wIm * wlenIm;
+        wIm = wRe * wlenIm + wIm * wlenRe;
+        wRe = nextWRe;
       }
     }
   }
-  return {re,im,n};
+  return { re, im, n };
 }
-function magnitudeFromReIm(re,im){const n=re.length,mag=new Float64Array(n);for(let i=0;i<n;i++)mag[i]=Math.hypot(re[i],im[i]);return mag;}
-function hannWindow(N){const w=new Float64Array(N);for(let i=0;i<N;i++)w[i]=0.5*(1-Math.cos(2*Math.PI*i/(N-1)));return w;}
-function bytesToHex(b){let s="";for(let i=0;i<b.length;i++)s+=("0"+b[i].toString(16)).slice(-2);return s;}
-function packInstructionArray(insArr){const buf=new Uint8Array(insArr.length*12);for(let i=0;i<insArr.length;i++){const base=i*12,ins=insArr[i],wf=ins.waveform||3;buf[base]=wf;buf[base+1]=0;buf[base+2]=ins.startHz&255;buf[base+3]=ins.startHz>>8;buf[base+4]=ins.duration&255;buf[base+5]=ins.duration>>8;buf[base+6]=ins.startAmp&255;buf[base+7]=ins.startAmp>>8;buf[base+8]=ins.endAmp&255;buf[base+9]=ins.endAmp>>8;buf[base+10]=ins.endHz&255;buf[base+11]=ins.endHz>>8;}return bytesToHex(buf);}
-const fileInput=document.getElementById('fileInput'),pickBtn=document.getElementById('pick'),drop=document.getElementById('drop'),go=document.getElementById('go'),periodEl=document.getElementById('period'),gainEl=document.getElementById('gain'),smoothEl=document.getElementById('smooth'),status=document.getElementById('status'),output=document.getElementById('output'),copyBtn=document.getElementById('copy'),downloadBtn=document.getElementById('download'),clearBtn=document.getElementById('clear');
-const buckets=[50,159,200,252,317,400,504,635,800,1008,1270,1600,2016,2504,3200,4032,5080,7000,9000];
-let currentBuffer=null;
-pickBtn.onclick=()=>fileInput.click();
-fileInput.onchange=e=>handleFiles(e.target.files);
-drop.addEventListener('dragover',e=>{e.preventDefault();drop.style.borderColor='rgba(255,255,255,0.28)';});
-drop.addEventListener('dragleave',()=>{drop.style.borderColor='rgba(255,255,255,0.06)';});
-drop.addEventListener('drop',e=>{e.preventDefault();drop.style.borderColor='rgba(255,255,255,0.06)';handleFiles(e.dataTransfer.files);});
-clearBtn.onclick=()=>{currentBuffer=null;output.textContent="// cleared";setStatus("Cleared.");};
-function setStatus(s){status.innerHTML="<small>"+s+"</small>";}
+function magnitudeFromReIm(re, im) {
+  const n = re.length, mag = new Float64Array(n);
+  for (let i = 0; i < n; i++) mag[i] = Math.hypot(re[i], im[i]);
+  return mag;
+}
+function hannWindow(N) {
+  const w = new Float64Array(N);
+  for (let i=0;i<N;i++) w[i] = 0.5*(1 - Math.cos(2*Math.PI*i/(N-1)));
+  return w;
+}
+function bytesToHex(bytes) {
+  let s = "";
+  for (let i=0;i<bytes.length;i++) s += ("0" + bytes[i].toString(16)).slice(-2);
+  return s;
+}
+function packInstructionArray(instructions) {
+  const buf = new Uint8Array(instructions.length * 12);
+  for (let i=0;i<instructions.length;i++){
+    const base = i*12;
+    const ins = instructions[i];
+    const waveform = ins.waveform||3;
+    buf[base] = waveform & 0xFF;
+    buf[base+1] = 0;
+    buf[base+2] = ins.startHz & 0xFF;
+    buf[base+3] = (ins.startHz >> 8) & 0xFF;
+    buf[base+4] = ins.duration & 0xFF;
+    buf[base+5] = (ins.duration >> 8) & 0xFF;
+    buf[base+6] = ins.startAmp & 0xFF;
+    buf[base+7] = (ins.startAmp >> 8) & 0xFF;
+    buf[base+8] = ins.endAmp & 0xFF;
+    buf[base+9] = (ins.endAmp >> 8) & 0xFF;
+    buf[base+10] = ins.endHz & 0xFF;
+    buf[base+11] = (ins.endHz >> 8) & 0xFF;
+  }
+  return bytesToHex(buf);
+}
+
+/* ========= UI elements ========= */
+const fileInput = document.getElementById('fileInput');
+const pickBtn = document.getElementById('pick');
+const drop = document.getElementById('drop');
+const clearBtn = document.getElementById('clear');
+const go = document.getElementById('go');
+const periodEl = document.getElementById('period');
+const gainEl = document.getElementById('gain');
+const smoothEl = document.getElementById('smooth');
+const status = document.getElementById('status');
+const output = document.getElementById('output');
+const copyBtn = document.getElementById('copy');
+const downloadBtn = document.getElementById('download');
+
+const buckets = [50,159,200,252,317,400,504,635,800,1008,1270,1600,2016,2504,3200,4032,5080,7000,9000]; // forum buckets
+
+let currentBuffer = null;
+pickBtn.onclick = ()=>fileInput.click();
+fileInput.onchange = e=>handleFiles(e.target.files);
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor='rgba(255,255,255,0.28)'; });
+drop.addEventListener('dragleave', ()=>{ drop.style.borderColor='rgba(255,255,255,0.06)'; });
+drop.addEventListener('drop', e => { e.preventDefault(); drop.style.borderColor='rgba(255,255,255,0.06)'; handleFiles(e.dataTransfer.files); });
+clearBtn.onclick = ()=>{ currentBuffer = null; output.textContent = "// cleared"; setStatus("Cleared."); };
+
+function setStatus(s, ok=false){ status.innerHTML = `<small${ok? ' class="ok"':''}>${s}</small>`; }
+
+/* decode WAV and store mono Float32 samples */
 async function handleFiles(files){
-  if(!files||!files.length)return;
-  const f=files[0];
-  setStatus(`Decoding ${f.name}...`);output.textContent=`// Decoding ${f.name}...`;
-  try{
-    const arr=await f.arrayBuffer();
-    const ac=new (window.AudioContext||window.webkitAudioContext)();
-    const decoded=await ac.decodeAudioData(arr.slice(0));
-    let samples=decoded.getChannelData(0);
-    if(decoded.numberOfChannels>1){
-      const out=new Float32Array(decoded.length);
-      for(let i=0;i<decoded.length;i++){let s=0;for(let c=0;c<decoded.numberOfChannels;c++)s+=decoded.getChannelData(c)[i];out[i]=s/decoded.numberOfChannels;}
-      samples=out;
+  if (!files || files.length === 0) return;
+  const f = files[0];
+  setStatus(`Decoding ${f.name}...`);
+  output.textContent = `// Decoding ${f.name}...`;
+  try {
+    const arr = await f.arrayBuffer();
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await ac.decodeAudioData(arr.slice(0));
+    let samples = decoded.getChannelData(0);
+    if (decoded.numberOfChannels > 1) {
+      const out = new Float32Array(decoded.length);
+      for (let i=0;i<decoded.length;i++){
+        let s = 0;
+        for (let c=0;c<decoded.numberOfChannels;c++) s += decoded.getChannelData(c)[i];
+        out[i] = s / decoded.numberOfChannels;
+      }
+      samples = out;
     }
-    currentBuffer={samples,sampleRate:decoded.sampleRate,duration:decoded.duration,name:f.name};
-    setStatus(`Loaded ${f.name} — ${decoded.duration.toFixed(2)}s @ ${decoded.sampleRate}Hz`);
-    output.textContent="// Ready. Click Convert.";
-  }catch(err){console.error(err);setStatus("Failed to decode file.");output.textContent="// Error decoding file.";}
+    currentBuffer = { samples, sampleRate: decoded.sampleRate, duration: decoded.duration, name: f.name };
+    setStatus(`Loaded ${f.name} — ${decoded.duration.toFixed(2)}s @ ${decoded.sampleRate}Hz`, true);
+    output.textContent = "// Ready. Click Convert.";
+  } catch (err) {
+    console.error(err);
+    setStatus("Failed to decode file.");
+    output.textContent = "// Error decoding file. Use a standard PCM WAV.";
+  }
 }
-go.onclick=()=>{if(!currentBuffer){setStatus("Drop a WAV first.");return;}processAndGenerate();}
-function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
-function processAndGenerate(){
-  setStatus("Processing...");output.textContent="// processing...";
-  const {samples,sampleRate}=currentBuffer;
-  const period=Math.max(8,parseInt(periodEl.value)||25),gain=Math.max(0.1,parseFloat(gainEl.value)||2.5),smooth=Math.max(1,parseInt(smoothEl.value)||3);
-  const nperseg=Math.round((period/1000)*sampleRate)||1024,window=hannWindow(nperseg),hop=nperseg,frames=[];
-  for(let start=0;start+nperseg<=samples.length;start+=hop){
-    const frame=new Float64Array(nperseg);
-    for(let i=0;i<nperseg;i++)frame[i]=(samples[start+i]*window[i])||0;
-    const {re,im}=fftReIm(frame);const mag=magnitudeFromReIm(re,im);
-    frames.push({mag,start});
+
+/* main conversion */
+go.onclick = ()=>{ if (!currentBuffer) { setStatus("Drop a WAV first."); return; } processAndGenerate(); }
+
+function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+
+function movingAverageArr(arr, ws){
+  const out = new Array(arr.length);
+  const half = Math.floor(ws/2);
+  for (let i=0;i<arr.length;i++){
+    let sum=0, cnt=0;
+    for (let j=i-half;j<=i+half;j++){ if (j>=0 && j<arr.length){ sum += arr[j]; cnt++; } }
+    out[i] = cnt? Math.round(sum/cnt) : 0;
   }
-  if(!frames.length){setStatus("Audio too short.");output.textContent="// too short";return;}
-  const fftFreqs=new Float64Array(nperseg);for(let k=0;k<nperseg;k++)fftFreqs[k]=(k*sampleRate)/nperseg;
-  const fftData=frames.map(f=>{const list=[],half=Math.floor(nperseg/2);for(let k=0;k<half;k++)list.push({freq:fftFreqs[k],amp:f.mag[k]});return list;});
-  let globalMax=0;for(const s of fftData)for(const x of s)if(x.amp>globalMax)globalMax=x.amp;if(globalMax===0)globalMax=1;
-  const threads=buckets.map(()=>[]);
-  for(let i=0;i<fftData.length;i++){
-    let prev=0,spectrum=fftData[i];
-    for(let b=0;b<buckets.length;b++){
-      const high=buckets[b];let best={freq:0,amp:0};
-      for(let s=0;s<spectrum.length;s++){const e=spectrum[s];if(e.freq>=prev&&e.freq<high&&e.amp>best.amp)best=e;}
-      const raw=Math.round((best.amp/globalMax)*1023),scaled=clamp(Math.round(raw*gain),0,1024);
-      threads[b].push({startHz:Math.max(1,Math.round(best.freq||0)),endHz:Math.max(1,Math.round(best.freq||0)),startAmp:scaled,endAmp:scaled,duration:period,waveform:3});
-      prev=high;
+  return out;
+}
+
+function processAndGenerate(){
+  setStatus("Processing...");
+  output.textContent = "// processing...";
+  const { samples, sampleRate, name } = currentBuffer;
+  const period = Math.max(8, parseInt(periodEl.value) || 25);
+  const gain = Math.max(0.1, parseFloat(gainEl.value) || 2.5);
+  const smooth = Math.max(1, parseInt(smoothEl.value) || 3);
+
+  const nperseg = Math.round((period/1000) * sampleRate) || 1024;
+  const window = hannWindow(nperseg);
+  const hop = nperseg; // no overlap; smoothing applied later
+
+  // compute frames
+  const frames = [];
+  for (let start = 0; start + nperseg <= samples.length; start += hop) {
+    const frame = new Float64Array(nperseg);
+    for (let i=0;i<nperseg;i++) frame[i] = (samples[start+i] * window[i]) || 0;
+    const { re, im } = fftReIm(frame);
+    const mag = magnitudeFromReIm(re, im);
+    frames.push({ mag, start });
+  }
+  if (frames.length === 0) { setStatus("Audio too short for chosen period."); output.textContent = "// too short"; return; }
+
+  // FFT freqs
+  const fftFreqs = new Float64Array(nperseg);
+  for (let k=0;k<nperseg;k++) fftFreqs[k] = (k * sampleRate) / nperseg;
+
+  // build fftData lists (freq, amp)
+  const fftData = frames.map(f => {
+    const list = [];
+    const half = Math.floor(nperseg/2);
+    for (let k=0;k<half;k++) list.push({ freq: fftFreqs[k], amp: f.mag[k] });
+    return list;
+  });
+
+  // global max for normalization (avoid extremely low scaling)
+  let globalMax = 0;
+  for (const s of fftData) for (const x of s) if (x.amp > globalMax) globalMax = x.amp;
+  if (globalMax === 0) globalMax = 1;
+
+  // threads (dedicated per bucket)
+  const threads = buckets.map(() => []);
+
+  // pick highest in each bucket with prev boundary trick
+  for (let i=0;i<fftData.length;i++){
+    let prev = 0;
+    const spectrum = fftData[i];
+    for (let b=0;b<buckets.length;b++){
+      const high = buckets[b];
+      let best = { freq: 0, amp: 0 };
+      for (let s=0;s<spectrum.length;s++){
+        const ent = spectrum[s];
+        if (ent.freq >= prev && ent.freq < high && ent.amp > best.amp) best = ent;
+      }
+      // raw amplitude scaled to 0..1023 relative to global max
+      const raw = Math.round((best.amp / globalMax) * 1023);
+      threads[b].push({
+        startHz: Math.max(1, Math.round(best.freq || 0)),
+        endHz: Math.max(1, Math.round(best.freq || 0)),
+        startAmp: raw,
+        endAmp: raw,
+        duration: period,
+        waveform: 3
+      });
+      prev = high;
     }
   }
-  const ws=Math.max(1,smooth);
-  for(let b=0;b<threads.length;b++){
-    const amps=threads[b].map(i=>i.startAmp),sm=new Array(amps.length);
-    for(let j=0;j<amps.length;j++){let sum=0,cnt=0;for(let k=j-Math.floor(ws/2);k<=j+Math.floor(ws/2);k++){if(k>=0&&k<amps.length){sum+=amps[k];cnt++;}}sm[j]=Math.round(sum/cnt||0);}
-    for(let j=0;j<threads[b].length;j++){threads[b][j].startAmp=threads[b][j].endAmp=clamp(sm[j],0,1024);}
+
+  // per-thread normalization + gain
+  for (let b=0;b<threads.length;b++){
+    const thr = threads[b];
+    const maxA = thr.reduce((m, it) => Math.max(m, it.startAmp), 0) || 1;
+    for (let i=0;i<thr.length;i++){
+      // scale to 0..1023 per-thread, then apply gain, then clamp to 0..1024
+      let scaled = Math.round((thr[i].startAmp / maxA) * 1023 * gain);
+      scaled = clamp(scaled, 0, 1024);
+      thr[i].startAmp = thr[i].endAmp = scaled;
+    }
+    // smoothing amplitudes with moving average
+    const amps = thr.map(x => x.startAmp);
+    const sm = movingAverageArr(amps, smooth);
+    for (let i=0;i<thr.length;i++){
+      thr[i].startAmp = thr[i].endAmp = clamp(sm[i], 0, 1024);
+    }
   }
-  const hexBuffers=threads.map(t=>packInstructionArray(t));
-  const tsLines=[
+
+  // pack each thread into hex buffer
+  const hexBuffers = threads.map(thr => packInstructionArray(thr));
+
+  // Build TypeScript result
+  const ts = [
     "namespace music {",
     "    //% shim=music::queuePlayInstructions",
     "    export function queuePlayInstructions(timeDelta: number, buf: Buffer) { }",
     "}",
     "",
     "const soundInstructions = [",
-    hexBuffers.map(h=>"    hex`"+h+"`,").join("\n"),
+    hexBuffers.map(h => "    hex`" + h + "`," ).join("\n"),
     "];",
     "",
     "for (const instructions of soundInstructions) {",
     "    music.queuePlayInstructions(100, instructions);",
     "}"
-  ];
-  output.textContent=tsLines.join("\n");
-  setStatus(`Done — ${threads.length} buffers processed.`);
+  ].join("\n");
+
+  output.textContent = ts;
+  setStatus(`Done — ${threads.length} buffers, ${frames.length} slices.`, true);
 }
-copyBtn.onclick=async()=>{try{await navigator.clipboard.writeText(output.textContent);setStatus("Copied to clipboard.");}catch(e){setStatus("Copy failed");}};
-downloadBtn.onclick=()=>{const blob=new Blob([output.textContent],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download="makecode_audio.ts";a.click();};
+
+/* Copy / Download */
+copyBtn.onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(output.textContent);
+    setStatus("Copied to clipboard 👍", true);
+  } catch (e) {
+    console.error(e);
+    setStatus("Copy failed", false);
+  }
+};
+downloadBtn.onclick = () => {
+  const blob = new Blob([output.textContent], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = "makecode_audio.ts";
+  a.click();
+};
+
 </script>
 </body>
 </html>
